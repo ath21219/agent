@@ -1,0 +1,35 @@
+{
+  "name": "my-agent",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "postinstall": "bash scripts/copy-vad-files.sh",
+    "dev": "next dev",
+    "build": "bash scripts/copy-vad-files.sh && next build",
+    "start": "next start",
+    "lint": "eslint"
+  },
+  "dependencies": {
+    "@pixiv/three-vrm": "^3.5.0",
+    "@pixiv/three-vrm-animation": "^3.5.0",
+    "@ricky0123/vad-react": "^0.0.36",
+    "next": "16.1.6",
+    "react": "19.2.3",
+    "react-dom": "19.2.3",
+    "simplex-noise": "^4.0.3",
+    "three": "^0.183.2",
+    "xsai": "^0.4.3"
+  },
+  "devDependencies": {
+    "@tailwindcss/postcss": "^4",
+    "@types/node": "^20",
+    "@types/react": "^19",
+    "@types/react-dom": "^19",
+    "@types/three": "^0.183.1",
+    "babel-plugin-react-compiler": "1.0.0",
+    "eslint": "^9",
+    "eslint-config-next": "16.1.6",
+    "tailwindcss": "^4",
+    "typescript": "^5"
+  }
+}
