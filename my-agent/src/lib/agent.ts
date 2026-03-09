@@ -197,6 +197,65 @@ function buildMultimodalMessages(
   return msgs
 }
 
+// ─── 記憶層ヘルパー ───
+async function memoryFetch(action: string, params: Record<string, unknown> = {}): Promise<any> {
+  try {
+    const res = await fetch('/api/memory', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ action, ...params }),
+    })
+    if (!res.ok) return null
+    return await res.json()
+  } catch {
+    return null
+  }
+}
+
+async function fetchMemoryContext(userText: string): Promise<string> {
+  const parts: string[] = []
+
+  // パーソナル要素を検索
+  const elemResult = await memoryFetch('searchPersonalElements', {
+    query: userText,
+    limit: 5,
+  })
+  if (elemResult?.results?.length > 0) {
+    const facts = elemResult.results
+      .filter((r: any) => r.distance < 0.5) // コサイン距離 0.5 未満のみ
+      .map((r: any) => `- ${r.item.summary}`)
+      .join('\n')
+    if (facts) {
+      parts.push(`【ユーザーについて覚えていること】\n${facts}`)
+    }
+  }
+
+  // 関連する過去の会話を検索
+  const chatResult = await memoryFetch('searchChatTexts', {
+    query: userText,
+    limit: 3,
+  })
+  if (chatResult?.results?.length > 0) {
+    const relevant = chatResult.results
+      .filter((r: any) => r.distance < 0.4)
+      .map((r: any) => `${r.item.role}: ${r.item.content}`)
+      .join('\n')
+    if (relevant) {
+      parts.push(`【関連する過去の会話】\n${relevant}`)
+    }
+  }
+
+  return parts.join('\n\n')
+}
+
+async function saveToMemory(
+  role: 'user' | 'assistant',
+  content: string,
+  tokenEstimate: number,
+): Promise<void> {
+  await memoryFetch('saveChatText', { role, content, tokenEstimate })
+}
+
 // === エージェントファクトリー ===
 export function createAgent(config: Partial<AgentConfig> = {}) {
   const origin = typeof window !== 'undefined' ? window.location.origin : 'http://localhost:3000'
@@ -258,6 +317,18 @@ export function createAgent(config: Partial<AgentConfig> = {}) {
     conversationHistory = trimHistory(
       conversationHistory, agentConfig.maxHistoryTokens, agentConfig.systemPrompt
     )
+
+    let systemPromptWithMemory = agentConfig.systemPrompt
+    try {
+      const memoryContext = await fetchMemoryContext(userText)
+      if (memoryContext) {
+        systemPromptWithMemory = agentConfig.systemPrompt + '\n\n' + memoryContext
+        // 一時的にシステムプロンプトを差し替え
+        conversationHistory[0] = { role: 'system', content: systemPromptWithMemory }
+      }
+    } catch (err) {
+      console.warn('[Agent] Memory context fetch failed, continuing without:', err)
+    }
 
     const messagesForLLM = buildMultimodalMessages(
       conversationHistory,
@@ -325,8 +396,20 @@ export function createAgent(config: Partial<AgentConfig> = {}) {
     const { cleanText: finalClean } = extractEmotion(fullText)
     conversationHistory.push({ role: 'assistant', content: finalClean })
 
+    // システムプロンプトを元に戻す
+    conversationHistory[0] = { role: 'system', content: agentConfig.systemPrompt }
+
     // 永続化
     saveHistory(agentConfig.storageKey, conversationHistory)
+
+    const userTokens = estimateTokens(userText)
+    const assistantTokens = estimateTokens(finalClean)
+    saveToMemory('user', userText, userTokens).catch(err =>
+      console.warn('[Agent] Memory save (user) failed:', err)
+    )
+    saveToMemory('assistant', finalClean, assistantTokens).catch(err =>
+      console.warn('[Agent] Memory save (assistant) failed:', err)
+    )
 
     onComplete(finalClean)
   }

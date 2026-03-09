@@ -14,6 +14,8 @@
     "@pixiv/three-vrm-animation": "^3.5.0",
     "@ricky0123/vad-react": "^0.0.36",
     "next": "16.1.6",
+    "pg": "^8.20.0",
+    "pgvector": "^0.2.1",
     "react": "19.2.3",
     "react-dom": "19.2.3",
     "simplex-noise": "^4.0.3",
@@ -23,6 +25,7 @@
   "devDependencies": {
     "@tailwindcss/postcss": "^4",
     "@types/node": "^20",
+    "@types/pg": "^8.18.0",
     "@types/react": "^19",
     "@types/react-dom": "^19",
     "@types/three": "^0.183.1",

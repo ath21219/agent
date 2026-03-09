@@ -35,6 +35,8 @@ export default function Home() {
   const [screenOn, setScreenOn] = useState(false)
   const [showVisionPanel, setShowVisionPanel] = useState(false)
 
+  const [memoryStatus, setMemoryStatus] = useState<{ db: boolean; embedding: boolean } | null>(null)
+
   const agentRef = useRef(createAgent())
   const ttsRef = useRef(createTTS())
   const activeSentencesRef = useRef(0)
@@ -60,6 +62,17 @@ export default function Home() {
 
   const updateTokenCount = useCallback(() => {
     setEstimatedTokens(agentRef.current.getEstimatedTokens())
+  }, [])
+
+  useEffect(() => {
+    fetch('/api/memory', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ action: 'health' }),
+    })
+      .then(res => res.json())
+      .then(status => setMemoryStatus(status))
+      .catch(() => setMemoryStatus(null))
   }, [])
 
   // ─── カメラ ON/OFF ───
@@ -248,6 +261,17 @@ export default function Home() {
         {/* ヘッダー */}
         <div className="flex items-center justify-between px-4 py-2 border-b border-gray-700 bg-gray-800">
           <span className="text-xs text-gray-400">≈ {estimatedTokens} tokens</span>
+          {memoryStatus ? (
+            <span className={`text-xs ${memoryStatus.db && memoryStatus.embedding ? 'text-green-400' : 'text-yellow-400'}`}>
+              {memoryStatus.db && memoryStatus.embedding
+                ? '🧠 Memory'
+                : memoryStatus.db
+                  ? '🧠 Memory (embedding offline)'
+                  : '⚠ Memory offline'}
+            </span>
+          ) : (
+            <span className="text-xs text-gray-500">🧠 Memory N/A</span>
+          )}
           <div className="flex gap-2">
             <button
               onClick={() => setShowVisionPanel(v => !v)}
