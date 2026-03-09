@@ -27,10 +27,10 @@ interface SentenceBuffer {
 
 export function createTTS(config: Partial<TTSConfig> = {}) {
   const ttsConfig: TTSConfig = {
-    apiKey: config.apiKey || process.env.NEXT_PUBLIC_TTS_API_KEY || '',
-    baseURL: config.baseURL || process.env.NEXT_PUBLIC_TTS_BASE_URL || '',
-    model: config.model || process.env.NEXT_PUBLIC_TTS_MODEL || 'tts-1',
-    voice: config.voice || process.env.NEXT_PUBLIC_TTS_VOICE || 'alloy',
+    apiKey: config.apiKey || 'proxy',                        // プロキシ経由なので不要
+    baseURL: config.baseURL || '/api/tts',                   // ★ ローカルプロキシ
+    model: config.model || process.env.TTS_MODEL || '',
+    voice: config.voice || process.env.TTS_VOICE || '',
   }
 
   // === Audio Context 管理 ===
@@ -150,16 +150,11 @@ export function createTTS(config: Partial<TTSConfig> = {}) {
    * 再生はここでは行わない。
    */
   async function fetchIntoBuffer(buf: SentenceBuffer): Promise<void> {
-    const baseURL = ttsConfig.baseURL.endsWith('/')
-      ? ttsConfig.baseURL
-      : ttsConfig.baseURL + '/'
-
     try {
-      const response = await fetch(`${baseURL}audio/speech`, {
+      const response = await fetch(ttsConfig.baseURL, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          'Authorization': `Bearer ${ttsConfig.apiKey}`,
         },
         body: JSON.stringify({
           model: ttsConfig.model,
@@ -425,17 +420,21 @@ export function createTTS(config: Partial<TTSConfig> = {}) {
 
   // フォールバック: 非ストリーミング再生
   async function speak(text: string): Promise<{ duration: number }> {
-    const { generateSpeech } = await import('@xsai/generate-speech')
-    const arrayBuffer = await generateSpeech({
-      apiKey: ttsConfig.apiKey,
-      baseURL: ttsConfig.baseURL,
-      model: ttsConfig.model,
-      input: text,
-      voice: ttsConfig.voice,
+    const response = await fetch(ttsConfig.baseURL, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        model: ttsConfig.model,
+        input: text,
+        voice: ttsConfig.voice,
+        response_format: 'mp3',   // 非ストリーミングは mp3 で受け取る
+      }),
     })
+    if (!response.ok) throw new Error(`TTS error: ${response.status}`)
+
+    const arrayBuffer = await response.arrayBuffer()
     const ctx = getAudioContext()
-    const copy = arrayBuffer.slice(0)
-    const audioBuffer = await ctx.decodeAudioData(copy)
+    const audioBuffer = await ctx.decodeAudioData(arrayBuffer)
     const source = ctx.createBufferSource()
     source.buffer = audioBuffer
     source.connect(getAnalyser())

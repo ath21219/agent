@@ -145,14 +145,15 @@ function trimHistory(messages: Message[], maxTokens: number, systemPrompt: strin
   return [systemMsg, ...trimmed]
 }
 
-// === エージェントファクトリー ===
 export function createAgent(config: Partial<AgentConfig> = {}) {
+  const origin = typeof window !== 'undefined' ? window.location.origin : 'http://localhost:3000'
+
   const agentConfig: AgentConfig = {
-    apiKey: config.apiKey || process.env.NEXT_PUBLIC_LLM_API_KEY || '',
-    baseURL: config.baseURL || process.env.NEXT_PUBLIC_LLM_BASE_URL || '',
-    model: config.model || process.env.NEXT_PUBLIC_LLM_MODEL || 'gpt-4o-mini',
+    apiKey: config.apiKey || 'proxy',
+    baseURL: config.baseURL || `${origin}/api/llm`,
+    model: config.model || process.env.LLM_MODEL || '',
     systemPrompt: config.systemPrompt || DEFAULT_SYSTEM_PROMPT,
-    maxHistoryTokens: config.maxHistoryTokens || 8000,  // デフォルト 8000 トークン
+    maxHistoryTokens: config.maxHistoryTokens || 8000,
     storageKey: config.storageKey || 'agent-history',
   }
 
