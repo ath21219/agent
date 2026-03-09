@@ -1,3 +1,5 @@
+// src/lib/tts.ts
+
 import { LipsyncAnalyser } from './lipsync'
 
 interface TTSConfig {
@@ -7,28 +9,26 @@ interface TTSConfig {
   voice: string
 }
 
-const BYTES_PER_SAMPLE = 2 // 16-bit = 2 bytes
+const BYTES_PER_SAMPLE = 2
 
-/** 各文のフェッチ状態を管理するバッファ */
 interface SentenceBuffer {
   index: number
   text: string
-  chunks: Float32Array[]     // 受信済みPCMチャンク（Float32変換済み）
+  chunks: Float32Array[]
   sampleRate: number
-  fetchDone: boolean         // フェッチ完了フラグ
+  fetchDone: boolean
   fetchError: Error | null
   abortController: AbortController
   onStart: () => void
   onEnd: () => void
-  // チャンク到着またはフェッチ完了を通知するための仕組み
   notifyReady: () => void
   waitForReady: () => Promise<void>
 }
 
 export function createTTS(config: Partial<TTSConfig> = {}) {
   const ttsConfig: TTSConfig = {
-    apiKey: config.apiKey || 'proxy',                        // プロキシ経由なので不要
-    baseURL: config.baseURL || '/api/tts',                   // ★ ローカルプロキシ
+    apiKey: config.apiKey || 'proxy',
+    baseURL: config.baseURL || '/api/tts',
     model: config.model || process.env.TTS_MODEL || '',
     voice: config.voice || process.env.TTS_VOICE || '',
   }
@@ -99,23 +99,22 @@ export function createTTS(config: Partial<TTSConfig> = {}) {
     return duration
   }
 
-  // === 先行フェッチ + 順序再生 パイプライン ===
+  // === パイプライン ===
 
-  /** 先行フェッチの最大同時数 */
   const MAX_PREFETCH = 3
-  /** 先行フェッチ開始の間隔（ミリ秒） */
   const PREFETCH_STAGGER_MS = 300
 
-  // パイプライン全体の状態
   let sentenceBuffers: Map<number, SentenceBuffer> = new Map()
   let pipelineActive = false
   let globalAborted = false
   let nextEnqueueIndex = 0
-  let currentPlayIndex = 0    // 次に再生すべき文のindex
-  let nextFetchIndex = 0      // 次にフェッチを開始すべき文のindex
-  let activeFetches = 0       // 現在進行中のフェッチ数
+  let currentPlayIndex = 0
+  let nextFetchIndex = 0
+  let activeFetches = 0
 
-  // パイプライン全体の進行通知
+  let playbackLoopDone: Promise<void> = Promise.resolve()
+  let fetchSchedulerLoopDone: Promise<void> = Promise.resolve()
+
   let pipelineNotify: () => void = () => { }
   let pipelineWait: () => Promise<void> = () => Promise.resolve()
 
@@ -125,7 +124,6 @@ export function createTTS(config: Partial<TTSConfig> = {}) {
     return {
       notify: () => {
         resolve()
-        // 新しいPromiseをセットアップ（次のwaitに備える）
         promise = new Promise<void>(r => { resolve = r })
       },
       wait: () => promise,
@@ -133,7 +131,6 @@ export function createTTS(config: Partial<TTSConfig> = {}) {
   }
 
   function createSentenceSignal(): { notify: () => void; wait: () => Promise<void> } {
-    // 文バッファ用のシグナル。チャンク到着 or フェッチ完了で通知
     let resolve: () => void = () => { }
     let promise = new Promise<void>(r => { resolve = r })
     return {
@@ -145,10 +142,6 @@ export function createTTS(config: Partial<TTSConfig> = {}) {
     }
   }
 
-  /**
-   * 1つの文に対するTTSフェッチを実行し、チャンクをバッファに蓄積する。
-   * 再生はここでは行わない。
-   */
   async function fetchIntoBuffer(buf: SentenceBuffer): Promise<void> {
     try {
       const response = await fetch(ttsConfig.baseURL, {
@@ -197,13 +190,12 @@ export function createTTS(config: Partial<TTSConfig> = {}) {
           pendingBytes = combined.slice(usableLength)
 
           buf.chunks.push(pcmToFloat32(toPlay))
-          buf.notifyReady() // 再生側に「チャンクが来たよ」と通知
+          buf.notifyReady()
         } else {
           pendingBytes = combined
         }
       }
 
-      // 残りのデータ
       if (pendingBytes.length >= BYTES_PER_SAMPLE) {
         const usableLength =
           Math.floor(pendingBytes.length / BYTES_PER_SAMPLE) * BYTES_PER_SAMPLE
@@ -224,52 +216,43 @@ export function createTTS(config: Partial<TTSConfig> = {}) {
       buf.notifyReady()
     } finally {
       activeFetches--
-      // フェッチ枠が空いたのでパイプラインに通知
       pipelineNotify()
     }
   }
 
-  /**
-   * 再生ループ: currentPlayIndex の文から順に、チャンクが届き次第スケジュール再生する。
-   * 1つの文の再生が完全に終わったら次の文へ進む。
-   */
   async function playbackLoop(): Promise<void> {
-    while (pipelineActive) {
+    while (pipelineActive && !globalAborted) {
       const buf = sentenceBuffers.get(currentPlayIndex)
       if (!buf) {
-        // まだこのindexのバッファが作られていない → パイプライン通知を待つ
         await pipelineWait()
         continue
       }
 
-      // この文の再生開始
+      if (globalAborted) return
+
       buf.onStart()
       console.log(
         `[TTS] Play start: #${buf.index} "${buf.text.slice(0, 30)}..."`,
       )
 
-      let chunkCursor = 0 // 次に再生すべきchunksのindex
+      let chunkCursor = 0
 
-      // この文の全チャンクを再生し終えるまでループ
       while (true) {
         if (globalAborted) return
 
         if (chunkCursor < buf.chunks.length) {
-          // 未再生チャンクがある → スケジュール
           while (chunkCursor < buf.chunks.length) {
             scheduleChunk(buf.chunks[chunkCursor], buf.sampleRate)
             chunkCursor++
           }
         } else if (buf.fetchDone) {
-          // フェッチ完了かつ全チャンク再生済み → この文は終了
           break
         } else {
-          // まだフェッチ中で新しいチャンクを待っている
           await buf.waitForReady()
+          if (globalAborted) return
         }
       }
 
-      // フェッチエラーがあった場合もonEndは呼ぶ
       if (buf.fetchError) {
         console.error(
           `[TTS] Skipping due to error: #${buf.index}`,
@@ -277,69 +260,56 @@ export function createTTS(config: Partial<TTSConfig> = {}) {
         )
       }
 
-      // この文のスケジュール済み音声の再生完了を待つ
       const ctx = getAudioContext()
       const remaining = nextPlayTime - ctx.currentTime
-      if (remaining > 0) {
+      if (remaining > 0 && !globalAborted) {
         await new Promise(resolve => setTimeout(resolve, remaining * 1000))
       }
+
+      if (globalAborted) return
 
       buf.onEnd()
       console.log(`[TTS] Play end: #${buf.index}`)
 
-      // 再生済みバッファを解放
       buf.chunks.length = 0
       sentenceBuffers.delete(currentPlayIndex)
 
       currentPlayIndex++
-
-      // フェッチ枠が空いた可能性があるのでパイプラインに通知
       pipelineNotify()
     }
+    console.log('[TTS] Playback loop exited')
   }
 
-  /**
-   * フェッチスケジューラ: ウィンドウサイズ内で先行フェッチを開始する。
-   * スタガリング間隔を空けてAPIに負荷をかけすぎないようにする。
-   */
   async function fetchSchedulerLoop(): Promise<void> {
-    while (pipelineActive) {
-      if (globalAborted) return
-
-      // ウィンドウ: 再生中の文 + 先行フェッチ数 が MAX_PREFETCH 以下
+    while (pipelineActive && !globalAborted) {
       const windowEnd = currentPlayIndex + MAX_PREFETCH
       if (nextFetchIndex < windowEnd && sentenceBuffers.has(nextFetchIndex)) {
         const buf = sentenceBuffers.get(nextFetchIndex)!
-        // まだフェッチ開始していないもののみ
         if (!buf.fetchDone && buf.chunks.length === 0 && activeFetches < MAX_PREFETCH) {
           console.log(
             `[TTS] Prefetch start: #${buf.index} "${buf.text.slice(0, 30)}..."`,
           )
           activeFetches++
-          fetchIntoBuffer(buf) // awaitしない（並行実行）
+          fetchIntoBuffer(buf)
           nextFetchIndex++
 
-          // スタガリング: 次のフェッチまで少し待つ
           await new Promise(r => setTimeout(r, PREFETCH_STAGGER_MS))
+          if (globalAborted) return
           continue
         }
       }
 
-      // キューにまだ登録されていない文があるかもしれないので待つ
-      // または全文完了なら終了
-      if (!sentenceBuffers.has(nextFetchIndex) && nextFetchIndex >= nextEnqueueIndex) {
-        // すべての登録済み文のフェッチを開始済み
-        // 新しい文が来るか、パイプラインが終わるまで待つ
-      }
       await pipelineWait()
     }
+    console.log('[TTS] Fetch scheduler loop exited')
   }
 
-  /**
-   * パイプラインを起動する（初回のenqueue時に呼ばれる）
-   */
-  function startPipeline(): void {
+  async function startPipeline(): Promise<void> {
     if (pipelineActive) return
+
+    await playbackLoopDone
+    await fetchSchedulerLoopDone
+
     pipelineActive = true
     globalAborted = false
 
@@ -347,19 +317,14 @@ export function createTTS(config: Partial<TTSConfig> = {}) {
     pipelineNotify = sig.notify
     pipelineWait = sig.wait
 
-    // 再生ループとフェッチスケジューラを並行起動
-    playbackLoop().catch(err => {
+    playbackLoopDone = playbackLoop().catch(err => {
       console.error('[TTS] Playback loop error:', err)
     })
-    fetchSchedulerLoop().catch(err => {
+    fetchSchedulerLoopDone = fetchSchedulerLoop().catch(err => {
       console.error('[TTS] Fetch scheduler error:', err)
     })
   }
 
-  /**
-   * 文をエンキューする。
-   * バッファを作成してパイプラインに登録する。
-   */
   function enqueueSentence(
     text: string,
     onStart: () => void,
@@ -372,7 +337,7 @@ export function createTTS(config: Partial<TTSConfig> = {}) {
       index,
       text,
       chunks: [],
-      sampleRate: 48000, // デフォルト。フェッチ時にレスポンスヘッダで上書き
+      sampleRate: 48000,
       fetchDone: false,
       fetchError: null,
       abortController: new AbortController(),
@@ -384,14 +349,13 @@ export function createTTS(config: Partial<TTSConfig> = {}) {
 
     sentenceBuffers.set(index, buf)
     startPipeline()
-    pipelineNotify() // スケジューラに新しい文が来たことを通知
+    pipelineNotify()
   }
 
   function clearQueue(): void {
     globalAborted = true
     pipelineActive = false
 
-    // 進行中のフェッチをすべて中断
     for (const buf of sentenceBuffers.values()) {
       buf.abortController.abort()
       if (!buf.fetchDone) {
@@ -400,7 +364,6 @@ export function createTTS(config: Partial<TTSConfig> = {}) {
       }
     }
 
-    // 未再生の文のonEndを呼ぶ
     for (const buf of sentenceBuffers.values()) {
       if (buf.index >= currentPlayIndex) {
         buf.onEnd()
@@ -414,11 +377,9 @@ export function createTTS(config: Partial<TTSConfig> = {}) {
     activeFetches = 0
     nextPlayTime = 0
 
-    // パイプラインの待機を解除
     pipelineNotify()
   }
 
-  // フォールバック: 非ストリーミング再生
   async function speak(text: string): Promise<{ duration: number }> {
     const response = await fetch(ttsConfig.baseURL, {
       method: 'POST',
@@ -427,7 +388,7 @@ export function createTTS(config: Partial<TTSConfig> = {}) {
         model: ttsConfig.model,
         input: text,
         voice: ttsConfig.voice,
-        response_format: 'mp3',   // 非ストリーミングは mp3 で受け取る
+        response_format: 'mp3',
       }),
     })
     if (!response.ok) throw new Error(`TTS error: ${response.status}`)

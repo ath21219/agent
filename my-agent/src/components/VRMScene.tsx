@@ -1,3 +1,5 @@
+// src/components/VRMScene.tsx
+
 'use client'
 
 import { useEffect, useRef, useCallback } from 'react'
@@ -37,23 +39,19 @@ const EMOTION_EXPRESSIONS = [
   VRMExpressionPresetName.Neutral,
 ]
 
-// ★ 感情ごとの瞼の閉じ度合い（0=開, 1=完全に閉じ）
-// この値だけまばたきの最大振れ幅を制限する
 const EMOTION_EYE_CLOSURE: Record<string, number> = {
-  [VRMExpressionPresetName.Happy]: 0.7,  // 笑顔で目を細める → 残り 0.3 分だけまばたき可能
+  [VRMExpressionPresetName.Happy]: 0.7,
   [VRMExpressionPresetName.Sad]: 0.2,
   [VRMExpressionPresetName.Angry]: 0.3,
-  [VRMExpressionPresetName.Surprised]: 0.0,  // 目を見開く → まばたき制限なし（むしろ開いている）
+  [VRMExpressionPresetName.Surprised]: 0.0,
   [VRMExpressionPresetName.Neutral]: 0.0,
 }
 
-// ★ 感情ごとの口への影響度（0=口に影響しない, 1=口を大きく使う）
-// リップシンクの値からこの分を差し引いて加算を相殺する
 const EMOTION_MOUTH_INFLUENCE: Record<string, number> = {
-  [VRMExpressionPresetName.Happy]: 0.3,  // 笑顔は口角を上げるが大きくは開けない
+  [VRMExpressionPresetName.Happy]: 0.3,
   [VRMExpressionPresetName.Sad]: 0.1,
   [VRMExpressionPresetName.Angry]: 0.15,
-  [VRMExpressionPresetName.Surprised]: 0.5,  // 驚きは口を大きく開ける
+  [VRMExpressionPresetName.Surprised]: 0.5,
   [VRMExpressionPresetName.Neutral]: 0.0,
 }
 
@@ -73,6 +71,9 @@ export default function VRMScene({ isSpeaking, visemeWeights, emotion, onCanvasR
   const isSpeakingRef = useRef(isSpeaking)
   const visemeWeightsRef = useRef(visemeWeights)
   const emotionRef = useRef(emotion)
+
+  const onCanvasReadyRef = useRef(onCanvasReady)
+  useEffect(() => { onCanvasReadyRef.current = onCanvasReady }, [onCanvasReady])
 
   useEffect(() => { isSpeakingRef.current = isSpeaking }, [isSpeaking])
   useEffect(() => { visemeWeightsRef.current = visemeWeights }, [visemeWeights])
@@ -109,15 +110,13 @@ export default function VRMScene({ isSpeaking, visemeWeights, emotion, onCanvasR
 
     const renderer = new THREE.WebGLRenderer({
       antialias: true,
-      preserveDrawingBuffer: true,  // ← 追加: toDataURL() でキャプチャ可能にする
+      preserveDrawingBuffer: true,
     })
     renderer.setSize(containerRef.current.clientWidth, containerRef.current.clientHeight)
     renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2))
     containerRef.current.appendChild(renderer.domElement)
 
-    if (onCanvasReady) {
-      onCanvasReady(renderer.domElement)
-    }
+    onCanvasReadyRef.current?.(renderer.domElement)
 
     const dirLight = new THREE.DirectionalLight(0xffffff, 1.0)
     dirLight.position.set(1, 1, 1)
@@ -170,9 +169,7 @@ export default function VRMScene({ isSpeaking, visemeWeights, emotion, onCanvasR
 
       if (vrm && vrm.expressionManager && vrm.humanoid) {
 
-        // ══════════════════════════════════════
         // 1. 呼吸
-        // ══════════════════════════════════════
         const breathCycle = Math.sin(elapsed * 1.2)
         const breathIntensity = 0.012
         const spineNode = vrm.humanoid.getNormalizedBoneNode(VRMHumanBoneName.Spine)
@@ -180,9 +177,7 @@ export default function VRMScene({ isSpeaking, visemeWeights, emotion, onCanvasR
         const chestNode = vrm.humanoid.getNormalizedBoneNode(VRMHumanBoneName.Chest)
         if (chestNode) chestNode.rotation.x = breathCycle * breathIntensity * 0.5
 
-        // ══════════════════════════════════════
         // 2. Perlin ノイズ微細揺れ
-        // ══════════════════════════════════════
         const headNode = vrm.humanoid.getNormalizedBoneNode(VRMHumanBoneName.Head)
         if (headNode) {
           headNode.rotation.x = simplex.noise(elapsed * 0.3, 0) * 0.015
@@ -194,16 +189,12 @@ export default function VRMScene({ isSpeaking, visemeWeights, emotion, onCanvasR
         if (leftUpperArmNode) leftUpperArmNode.rotation.z = 1.2 + simplex.noise(elapsed * 0.4, 20) * 0.005
         if (rightUpperArmNode) rightUpperArmNode.rotation.z = -1.2 + simplex.noise(elapsed * 0.35, 30) * 0.005
 
-        // ══════════════════════════════════════
         // 3. 視線追従
-        // ══════════════════════════════════════
         const lerpSpeed = 1.0 - Math.pow(0.001, delta)
         lookAtTarget.position.x += (mouseRef.current.x - lookAtTarget.position.x) * lerpSpeed
         lookAtTarget.position.y += (mouseRef.current.y - lookAtTarget.position.y) * lerpSpeed
 
-        // ══════════════════════════════════════
-        // 4. ★ 感情表現（常にフル強度）
-        // ══════════════════════════════════════
+        // 4. 感情表現
         const currentEmotion = emotionRef.current || 'neutral'
         const targetExpression = EMOTION_MAP[currentEmotion]
         const emotionLerpUp = 3.0 * delta
@@ -211,7 +202,7 @@ export default function VRMScene({ isSpeaking, visemeWeights, emotion, onCanvasR
 
         let eyeClosureFromEmotion = 0
         let emotionIsTransitioning = false
-        let mouthInfluenceFromEmotion = 0  // ★ 感情が口に与えている影響度
+        let mouthInfluenceFromEmotion = 0
 
         for (const expr of EMOTION_EXPRESSIONS) {
           const currentVal = emotionValuesRef.current[expr] || 0
@@ -230,17 +221,14 @@ export default function VRMScene({ isSpeaking, visemeWeights, emotion, onCanvasR
 
           emotionValuesRef.current[expr] = newVal
 
-          // ★ 感情を常にフル強度で設定（スケーリングしない）
           if (expr !== VRMExpressionPresetName.Neutral) {
             vrm.expressionManager.setValue(expr, newVal)
           }
 
-          // 瞼の閉じ度合い
           if (newVal > 0.01 && EMOTION_EYE_CLOSURE[expr] !== undefined) {
             eyeClosureFromEmotion += EMOTION_EYE_CLOSURE[expr] * newVal
           }
 
-          // ★ 口への影響度を加重平均
           if (newVal > 0.01 && EMOTION_MOUTH_INFLUENCE[expr] !== undefined) {
             mouthInfluenceFromEmotion += EMOTION_MOUTH_INFLUENCE[expr] * newVal
           }
@@ -248,20 +236,14 @@ export default function VRMScene({ isSpeaking, visemeWeights, emotion, onCanvasR
         eyeClosureFromEmotion = Math.min(eyeClosureFromEmotion, 1.0)
         mouthInfluenceFromEmotion = Math.min(mouthInfluenceFromEmotion, 1.0)
 
-        // ══════════════════════════════════════
-        // 5. ★ リップシンク（感情の口影響分を差し引き）
-        // ══════════════════════════════════════
+        // 5. リップシンク
         const weights = visemeWeightsRef.current
         const speaking = isSpeakingRef.current
         const lipLerpSpeed = 10.0 * delta
 
         for (const [visemeKey, preset] of Object.entries(VISEME_MAP)) {
           const rawTarget = speaking ? (weights[visemeKey as VRMViseme] || 0) : 0
-
-          // ★ 感情が口に与えている分を差し引いて加算の過剰を防ぐ
-          // ただし 0 以下にはしない（口は閉じる方向には行かない）
           const adjustedTarget = Math.max(0, rawTarget - mouthInfluenceFromEmotion * rawTarget * 0.5)
-
           const currentVal = lipValuesRef.current[preset] || 0
           const newVal = currentVal + (adjustedTarget - currentVal) * Math.min(lipLerpSpeed, 1.0)
           lipValuesRef.current[preset] = newVal
@@ -271,37 +253,30 @@ export default function VRMScene({ isSpeaking, visemeWeights, emotion, onCanvasR
           }
         }
 
-        // ══════════════════════════════════════
-        // 6. ★ 自然なまばたき
-        // ══════════════════════════════════════
+        // 6. 自然なまばたき
         const blinkMaxValue = Math.max(0, 1.0 - eyeClosureFromEmotion)
 
-        // 感情遷移中は新しいまばたきを開始しない
         if (emotionIsTransitioning && blinkPhaseRef.current === 0) {
           blinkTimerRef.current = 0.5 + Math.random() * 1.0
         } else {
           blinkTimerRef.current -= delta
 
           if (blinkPhaseRef.current === 0 && blinkTimerRef.current <= 0) {
-            // ★ 閉じフェーズ開始
             blinkPhaseRef.current = 1
-            blinkTimerRef.current = 0  // 補間で閉じるのでタイマーは経過時間の追跡用
+            blinkTimerRef.current = 0
           } else if (blinkPhaseRef.current === 1) {
-            // ★ 滑らかに閉じる
             blinkValueRef.current += (blinkMaxValue - blinkValueRef.current) * Math.min(22 * delta, 1.0)
             if (blinkValueRef.current >= blinkMaxValue * 0.95) {
               blinkValueRef.current = blinkMaxValue
               blinkPhaseRef.current = 2
-              blinkTimerRef.current = 0.03 + Math.random() * 0.02  // ★ 閉じた状態を少し維持
+              blinkTimerRef.current = 0.03 + Math.random() * 0.02
             }
           } else if (blinkPhaseRef.current === 2) {
-            // ★ 閉じた状態を維持
             blinkTimerRef.current -= delta
             if (blinkTimerRef.current <= 0) {
               blinkPhaseRef.current = 3
             }
           } else if (blinkPhaseRef.current === 3) {
-            // ★ 滑らかに開く（閉じるより少しゆっくり）
             blinkValueRef.current += (0 - blinkValueRef.current) * Math.min(10 * delta, 1.0)
             if (blinkValueRef.current < 0.02) {
               blinkValueRef.current = 0
@@ -313,9 +288,7 @@ export default function VRMScene({ isSpeaking, visemeWeights, emotion, onCanvasR
 
         vrm.expressionManager.setValue(VRMExpressionPresetName.Blink, blinkValueRef.current)
 
-        // ══════════════════════════════════════
         // VRM update
-        // ══════════════════════════════════════
         vrm.update(delta)
       }
 
@@ -340,7 +313,7 @@ export default function VRMScene({ isSpeaking, visemeWeights, emotion, onCanvasR
       renderer.dispose()
       timer.dispose()
     }
-  }, [onCanvasReady])
+  }, [])
 
   useEffect(() => {
     const cleanup = initScene()
