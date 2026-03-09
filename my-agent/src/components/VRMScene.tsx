@@ -61,9 +61,10 @@ interface VRMSceneProps {
   isSpeaking: boolean
   visemeWeights: Record<VRMViseme, number>
   emotion: string | null
+  onCanvasReady?: (canvas: HTMLCanvasElement) => void
 }
 
-export default function VRMScene({ isSpeaking, visemeWeights, emotion }: VRMSceneProps) {
+export default function VRMScene({ isSpeaking, visemeWeights, emotion, onCanvasReady }: VRMSceneProps) {
   const containerRef = useRef<HTMLDivElement>(null)
   const vrmRef = useRef<VRM | null>(null)
   const timerRef = useRef(new Timer())
@@ -106,10 +107,17 @@ export default function VRMScene({ isSpeaking, visemeWeights, emotion }: VRMScen
     camera.position.set(0, 1.3, 1.5)
     camera.lookAt(0, 1.2, 0)
 
-    const renderer = new THREE.WebGLRenderer({ antialias: true })
+    const renderer = new THREE.WebGLRenderer({
+      antialias: true,
+      preserveDrawingBuffer: true,  // ← 追加: toDataURL() でキャプチャ可能にする
+    })
     renderer.setSize(containerRef.current.clientWidth, containerRef.current.clientHeight)
     renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2))
     containerRef.current.appendChild(renderer.domElement)
+
+    if (onCanvasReady) {
+      onCanvasReady(renderer.domElement)
+    }
 
     const dirLight = new THREE.DirectionalLight(0xffffff, 1.0)
     dirLight.position.set(1, 1, 1)
@@ -332,7 +340,7 @@ export default function VRMScene({ isSpeaking, visemeWeights, emotion }: VRMScen
       renderer.dispose()
       timer.dispose()
     }
-  }, [])
+  }, [onCanvasReady])
 
   useEffect(() => {
     const cleanup = initScene()

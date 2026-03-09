@@ -1,10 +1,13 @@
+// src/lib/agent.ts
+
 import { generateText } from '@xsai/generate-text'
 import { streamText } from '@xsai/stream-text'
+import type { VisionSnapshot } from './vision'
 
 // --- 型定義 ---
 export interface Message {
   role: 'system' | 'user' | 'assistant'
-  content: string
+  content: string                           // ★ string のまま維持
 }
 
 export interface AgentConfig {
@@ -12,9 +15,22 @@ export interface AgentConfig {
   baseURL: string
   model: string
   systemPrompt: string
-  maxHistoryTokens: number   // 会話履歴の最大推定トークン数
-  storageKey: string         // localStorage のキー
+  maxHistoryTokens: number
+  storageKey: string
 }
+
+type ContentPart =
+  | { type: 'text'; text: string }
+  | { type: 'image_url'; image_url: { url: string } }
+
+interface MultimodalMessage {
+  role: 'system' | 'user' | 'assistant'
+  content: string | ContentPart[]
+}
+
+// ─── 画像トークン見積もり定数 ───
+const IMAGE_TOKENS_NORMAL = 258   // 384px以下 → 固定258
+const IMAGE_TOKENS_HD = 1032      // 1280px → 最大4タイル
 
 // --- 日本語の文区切り正規表現 ---
 const SENTENCE_DELIMITERS = /([。！？\!\?\n])/
@@ -56,13 +72,16 @@ const DEFAULT_SYSTEM_PROMPT = `# あなたの役割
 アイリ: [neutral] うーん、ごめん、天気予報はわからないんだ。アプリで確認してみて！
 
 ユーザー: 実はAIに意識があると思うんだけど
-アイリ: [surprise] おっ、哲学的な話だね！面白いテーマだけど、私にはまだよくわからないな。`
+アイリ: [surprise] おっ、哲学的な話だね！面白いテーマだけど、私にはまだよくわからないな。
 
-// --- ★ トークン数の推定（日本語対応）---
+# 視覚認知
+ユーザーの発言にカメラ映像や画面キャプチャが添付されている場合があります。
+- [ユーザーのカメラ映像] — ユーザーの表情や周囲の様子が写っています。自然に言及してください（例：「笑ってるね」「暗い部屋にいるの？」）。ただし、毎回画像に言及する必要はなく、会話の流れに合う場合のみにしてください。
+- [ユーザーの画面キャプチャ] — ユーザーが今見ている画面です。内容について質問されたら答えてください。
+- [あなた自身の現在の見た目] — あなた（アイリ）の3Dアバターの現在のスクリーンショットです。自分がどう見えているかを把握し、表情が会話の内容と合っていない場合は意識的に修正してください。`
+
+// --- トークン数の推定（日本語対応）---
 function estimateTokens(text: string): number {
-  // 日本語: 約 1〜2 文字 / トークン（平均 1.5）
-  // 英語: 約 4 文字 / トークン
-  // ASCII と非 ASCII を分けてカウント
   let asciiChars = 0
   let nonAsciiChars = 0
   for (let i = 0; i < text.length; i++) {
@@ -78,15 +97,14 @@ function estimateTokens(text: string): number {
 function estimateMessagesTokens(messages: Message[]): number {
   let total = 0
   for (const msg of messages) {
-    total += estimateTokens(msg.content) + 4 // role + formatting overhead
+    total += estimateTokens(msg.content) + 4
   }
   return total
 }
 
-// --- ★ localStorage ヘルパー ---
+// --- localStorage ヘルパー ---
 function saveHistory(key: string, messages: Message[]): void {
   try {
-    // system メッセージは保存しない（起動時に再構築するため）
     const toSave = messages.filter(m => m.role !== 'system')
     localStorage.setItem(key, JSON.stringify(toSave))
   } catch {
@@ -99,7 +117,6 @@ function loadHistory(key: string): Message[] {
     const stored = localStorage.getItem(key)
     if (stored) {
       const parsed = JSON.parse(stored) as Message[]
-      // バリデーション
       if (Array.isArray(parsed) && parsed.every(m => m.role && m.content)) {
         return parsed
       }
@@ -110,7 +127,7 @@ function loadHistory(key: string): Message[] {
   return []
 }
 
-// --- ★ 感情タグ抽出 ---
+// --- 感情タグ抽出 ---
 function extractEmotion(text: string): { emotion: string; cleanText: string } {
   const match = text.match(/^\[(joy|sad|angry|surprise|neutral)\]\s*/)
   return {
@@ -119,22 +136,18 @@ function extractEmotion(text: string): { emotion: string; cleanText: string } {
   }
 }
 
-// --- ★ 会話履歴のトリミング（古いメッセージを削除）---
+// --- 会話履歴のトリミング ---
 function trimHistory(messages: Message[], maxTokens: number, systemPrompt: string): Message[] {
   const systemMsg: Message = { role: 'system', content: systemPrompt }
   const systemTokens = estimateTokens(systemPrompt) + 4
 
-  // system 以外のメッセージ
   const history = messages.filter(m => m.role !== 'system')
-
-  // 現在のトークン数を確認
   let totalTokens = systemTokens + estimateMessagesTokens(history)
 
   if (totalTokens <= maxTokens) {
     return [systemMsg, ...history]
   }
 
-  // 古いメッセージから削除（ユーザーとアシスタントのペアで削除）
   const trimmed = [...history]
   while (totalTokens > maxTokens && trimmed.length > 2) {
     const removed = trimmed.shift()!
@@ -145,6 +158,46 @@ function trimHistory(messages: Message[], maxTokens: number, systemPrompt: strin
   return [systemMsg, ...trimmed]
 }
 
+// ─── マルチモーダルメッセージ構築 ───
+function buildMultimodalMessages(
+  history: Message[],
+  vision?: VisionSnapshot,
+): MultimodalMessage[] {
+  // vision が無い、またはフレームも内部状態テキストも無い場合はそのまま返す
+  if (!vision || (vision.frames.length === 0 && !vision.internalState)) {
+    return history as MultimodalMessage[]
+  }
+
+  const msgs: MultimodalMessage[] = history.slice(0, -1) as MultimodalMessage[]
+  const lastUser = history[history.length - 1]
+
+  // 最後のユーザーメッセージをマルチモーダルに変換
+  const parts: ContentPart[] = []
+
+  // 内部状態テキスト
+  if (vision.internalState) {
+    parts.push({ type: 'text', text: vision.internalState })
+  }
+
+  // 画像フレーム
+  const labelMap: Record<string, string> = {
+    'camera': '【ユーザーのカメラ映像】',
+    'screen': '【ユーザーの画面】',
+    'vrm-mirror': '【あなた自身の今の姿（鏡）】',
+  }
+  for (const frame of vision.frames) {
+    parts.push({ type: 'text', text: labelMap[frame.label] || `【${frame.label}】` })
+    parts.push({ type: 'image_url', image_url: { url: frame.dataUrl } })
+  }
+
+  // ユーザーのテキスト
+  parts.push({ type: 'text', text: lastUser.content })
+
+  msgs.push({ role: 'user', content: parts })
+  return msgs
+}
+
+// === エージェントファクトリー ===
 export function createAgent(config: Partial<AgentConfig> = {}) {
   const origin = typeof window !== 'undefined' ? window.location.origin : 'http://localhost:3000'
 
@@ -172,7 +225,6 @@ export function createAgent(config: Partial<AgentConfig> = {}) {
   async function chat(userMessage: string): Promise<{ text: string; emotion: string }> {
     conversationHistory.push({ role: 'user', content: userMessage })
 
-    // トリミング
     conversationHistory = trimHistory(
       conversationHistory, agentConfig.maxHistoryTokens, agentConfig.systemPrompt
     )
@@ -187,30 +239,39 @@ export function createAgent(config: Partial<AgentConfig> = {}) {
     const { emotion, cleanText } = extractEmotion(text || '')
     conversationHistory.push({ role: 'assistant', content: cleanText })
 
-    // 永続化
     saveHistory(agentConfig.storageKey, conversationHistory)
 
     return { text: cleanText, emotion }
   }
 
-  // --- ★ ストリーミング + 文単位チャンキング ---
+  // --- ★ ストリーミング + 文単位チャンキング（Phase 2-D: vision 対応）---
   async function chatStreamSentences(
-    userMessage: string,
+    userText: string,
     onSentence: (sentence: string, emotion: string, isFirst: boolean) => void,
     onComplete: (fullText: string) => void,
+    options?: { vision?: VisionSnapshot },
   ): Promise<void> {
-    conversationHistory.push({ role: 'user', content: userMessage })
+    // テキストのみを履歴に追加（画像は保存しない）
+    conversationHistory.push({ role: 'user', content: userText })
 
     // トリミング
     conversationHistory = trimHistory(
       conversationHistory, agentConfig.maxHistoryTokens, agentConfig.systemPrompt
     )
 
-    const { textStream } = streamText({
+    const messagesForLLM = buildMultimodalMessages(
+      conversationHistory,
+      options?.vision,
+    )
+
+    // ★ xsAI の messages パラメータは any[] として渡す
+    //   （xsAI の型定義は content: string だが、OpenAI互換APIは
+    //     content: ContentPart[] も受け付ける。実行時には問題ない）
+    const { textStream } = await streamText({
       apiKey: agentConfig.apiKey,
       baseURL: agentConfig.baseURL,
       model: agentConfig.model,
-      messages: conversationHistory,
+      messages: messagesForLLM as Parameters<typeof streamText>[0]['messages'],
     })
 
     const reader = textStream.getReader()
@@ -274,7 +335,6 @@ export function createAgent(config: Partial<AgentConfig> = {}) {
     return [...conversationHistory]
   }
 
-  // ★ 表示用の履歴（system メッセージを除外）
   function getDisplayHistory(): { role: string; text: string }[] {
     return conversationHistory
       .filter(m => m.role !== 'system')
@@ -289,7 +349,6 @@ export function createAgent(config: Partial<AgentConfig> = {}) {
     console.log('[Agent] History cleared')
   }
 
-  // ★ 現在の推定トークン数
   function getEstimatedTokens(): number {
     return estimateMessagesTokens(conversationHistory)
   }

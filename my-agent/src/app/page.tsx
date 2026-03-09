@@ -6,6 +6,14 @@ import VoiceInput from '@/components/VoiceInput'
 import { createAgent } from '@/lib/agent'
 import { createTTS } from '@/lib/tts'
 import type { LipsyncAnalyser, VRMViseme } from '@/lib/lipsync'
+import {
+  startCamera, stopCamera, isCameraActive,
+  startScreenCapture, stopScreenCapture, isScreenActive,
+  setVRMCanvas, captureAll, saveFrameLog, exportVisionLog, clearVisionLog,
+  describeVRMState,
+  DEFAULT_VISION_CONFIG,
+  type VisionConfig, type Resolution,
+} from '@/lib/vision'
 
 export default function Home() {
   const [messages, setMessages] = useState<{ role: string; text: string }[]>([])
@@ -19,6 +27,13 @@ export default function Home() {
   const [isListening, setIsListening] = useState(false)
   const [streamingText, setStreamingText] = useState('')
   const [estimatedTokens, setEstimatedTokens] = useState(0)
+
+  // ─── Vision 状態 ───
+  const [visionConfig, setVisionConfig] = useState<VisionConfig>(DEFAULT_VISION_CONFIG)
+  const [visionEnabled, setVisionEnabled] = useState(false)
+  const [cameraOn, setCameraOn] = useState(false)
+  const [screenOn, setScreenOn] = useState(false)
+  const [showVisionPanel, setShowVisionPanel] = useState(false)
 
   const agentRef = useRef(createAgent())
   const ttsRef = useRef(createTTS())
@@ -43,11 +58,46 @@ export default function Home() {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
   }, [messages, streamingText])
 
-  // トークン数を更新
   const updateTokenCount = useCallback(() => {
     setEstimatedTokens(agentRef.current.getEstimatedTokens())
   }, [])
 
+  // ─── カメラ ON/OFF ───
+  const toggleCamera = useCallback(async () => {
+    if (isCameraActive()) {
+      stopCamera()
+      setCameraOn(false)
+    } else {
+      try {
+        await startCamera()
+        setCameraOn(true)
+      } catch (err) {
+        console.error('Camera error:', err)
+      }
+    }
+  }, [])
+
+  // ─── 画面共有 ON/OFF ───
+  const toggleScreen = useCallback(async () => {
+    if (isScreenActive()) {
+      stopScreenCapture()
+      setScreenOn(false)
+    } else {
+      try {
+        await startScreenCapture()
+        setScreenOn(true)
+      } catch (err) {
+        console.error('Screen capture error:', err)
+      }
+    }
+  }, [])
+
+  // ─── VRM Canvas コールバック ───
+  const handleCanvasReady = useCallback((canvas: HTMLCanvasElement) => {
+    setVRMCanvas(canvas)
+  }, [])
+
+  // ─── リップシンク ───
   const startLipSync = useCallback(() => {
     setIsSpeaking(true)
     if (neutralTimerRef.current) {
@@ -89,6 +139,7 @@ export default function Home() {
     }
   }, [])
 
+  // ─── メッセージ送信 ───
   const sendMessage = useCallback(async (text: string) => {
     if (!text.trim() || isProcessing) return
 
@@ -98,15 +149,29 @@ export default function Home() {
     activeSentencesRef.current = 0
     pendingEmotionsRef.current = []
 
-    // ★ ユーザー発言追加直後にトークン数を更新
-    // （agent 内部では chatStreamSentences の冒頭で push されるため、
-    //   次のフレームで反映される。ここでは先に UI を更新する）
     setTimeout(() => updateTokenCount(), 0)
+
+    // ─── Vision キャプチャ ───
+    let visionSnapshot = undefined
+    if (visionEnabled) {
+      const vrmState = {
+        emotion: currentEmotion || 'neutral',
+        isSpeaking,
+      }
+      visionSnapshot = captureAll(visionConfig, vrmState)
+
+      // IndexedDB にログ保存
+      if (visionSnapshot.frames.length > 0) {
+        saveFrameLog(visionSnapshot).catch(err =>
+          console.error('Vision log save error:', err)
+        )
+      }
+    }
 
     try {
       await agentRef.current.chatStreamSentences(
         text,
-        (sentence, emotion, isFirst) => {
+        (sentence, emotion) => {
           setStreamingText(prev => prev + (prev ? '' : '') + sentence)
           pendingEmotionsRef.current.push(emotion)
 
@@ -132,6 +197,7 @@ export default function Home() {
           setIsProcessing(false)
           updateTokenCount()
         },
+        { vision: visionSnapshot },
       )
     } catch (err) {
       console.error('[Agent] Error:', err)
@@ -139,7 +205,7 @@ export default function Home() {
       setIsProcessing(false)
       stopLipSync()
     }
-  }, [isProcessing, startLipSync, stopLipSync, updateTokenCount])
+  }, [isProcessing, visionEnabled, visionConfig, currentEmotion, isSpeaking, startLipSync, stopLipSync, updateTokenCount])
 
   const handleVoiceTranscript = useCallback((transcript: string) => {
     sendMessage(transcript)
@@ -151,23 +217,23 @@ export default function Home() {
     setInputText('')
   }
 
-  // ★ 会話クリア
   const handleClearHistory = useCallback(() => {
     agentRef.current.clearHistory()
     setMessages([])
     setCurrentEmotion('neutral')
-    // ★ クリア後に明示的にトークン数を再取得
     setTimeout(() => setEstimatedTokens(agentRef.current.getEstimatedTokens()), 0)
     ttsRef.current.clearQueue()
   }, [])
 
   return (
     <div className="flex h-screen bg-gray-900 text-white">
+      {/* ─── 左: 3D + マイクボタン ─── */}
       <div className="flex-1 relative">
         <VRMScene
           isSpeaking={isSpeaking}
           visemeWeights={visemeWeights}
           emotion={currentEmotion}
+          onCanvasReady={handleCanvasReady}
         />
         <button
           onClick={() => setIsListening(!isListening)}
@@ -177,18 +243,130 @@ export default function Home() {
         </button>
       </div>
 
+      {/* ─── 右: チャット + Vision パネル ─── */}
       <div className="w-96 flex flex-col border-l border-gray-700">
-        {/* ★ ヘッダー: トークン数 + クリアボタン */}
+        {/* ヘッダー */}
         <div className="flex items-center justify-between px-4 py-2 border-b border-gray-700 bg-gray-800">
           <span className="text-xs text-gray-400">≈ {estimatedTokens} tokens</span>
-          <button
-            onClick={handleClearHistory}
-            className="text-xs text-gray-400 hover:text-red-400 transition"
-            title="会話履歴をクリア"
-          >
-            履歴クリア
-          </button>
+          <div className="flex gap-2">
+            <button
+              onClick={() => setShowVisionPanel(v => !v)}
+              className={`text-xs px-2 py-1 rounded ${showVisionPanel ? 'bg-purple-600' : 'bg-gray-600'} hover:opacity-80 transition`}
+            >
+              Vision
+            </button>
+            <button
+              onClick={handleClearHistory}
+              className="text-xs text-gray-400 hover:text-red-400 transition"
+              title="会話履歴をクリア"
+            >
+              履歴クリア
+            </button>
+          </div>
         </div>
+
+        {/* ─── Vision 設定パネル ─── */}
+        {showVisionPanel && (
+          <div className="px-4 py-3 border-b border-gray-700 bg-gray-850 space-y-2 text-xs">
+            {/* Vision ON/OFF */}
+            <div className="flex items-center justify-between">
+              <span>Vision</span>
+              <button
+                onClick={() => setVisionEnabled(v => !v)}
+                className={`px-3 py-1 rounded ${visionEnabled ? 'bg-green-600' : 'bg-gray-600'}`}
+              >
+                {visionEnabled ? 'ON' : 'OFF'}
+              </button>
+            </div>
+
+            {visionEnabled && (
+              <>
+                {/* カメラ */}
+                <div className="flex items-center justify-between">
+                  <span>カメラ</span>
+                  <button
+                    onClick={toggleCamera}
+                    className={`px-3 py-1 rounded ${cameraOn ? 'bg-green-600' : 'bg-gray-600'}`}
+                  >
+                    {cameraOn ? 'ON' : 'OFF'}
+                  </button>
+                </div>
+
+                {/* 画面共有 */}
+                <div className="flex items-center justify-between">
+                  <span>画面共有</span>
+                  <button
+                    onClick={toggleScreen}
+                    className={`px-3 py-1 rounded ${screenOn ? 'bg-green-600' : 'bg-gray-600'}`}
+                  >
+                    {screenOn ? 'ON' : 'OFF'}
+                  </button>
+                </div>
+
+                {/* VRM ミラー */}
+                <div className="flex items-center justify-between">
+                  <span>VRM ミラー</span>
+                  <button
+                    onClick={() => setVisionConfig(c => ({ ...c, vrmMirrorEnabled: !c.vrmMirrorEnabled }))}
+                    className={`px-3 py-1 rounded ${visionConfig.vrmMirrorEnabled ? 'bg-green-600' : 'bg-gray-600'}`}
+                  >
+                    {visionConfig.vrmMirrorEnabled ? 'ON' : 'OFF'}
+                  </button>
+                </div>
+
+                {/* 内部状態テキスト */}
+                <div className="flex items-center justify-between">
+                  <span>内部状態テキスト</span>
+                  <button
+                    onClick={() => setVisionConfig(c => ({ ...c, internalStateEnabled: !c.internalStateEnabled }))}
+                    className={`px-3 py-1 rounded ${visionConfig.internalStateEnabled ? 'bg-green-600' : 'bg-gray-600'}`}
+                  >
+                    {visionConfig.internalStateEnabled ? 'ON' : 'OFF'}
+                  </button>
+                </div>
+
+                {/* 解像度 */}
+                <div className="flex items-center justify-between">
+                  <span>解像度</span>
+                  <div className="flex gap-1">
+                    {(['normal', 'hd'] as Resolution[]).map(r => (
+                      <button
+                        key={r}
+                        onClick={() => setVisionConfig(c => ({ ...c, resolution: r }))}
+                        className={`px-2 py-1 rounded ${visionConfig.resolution === r ? 'bg-blue-600' : 'bg-gray-600'}`}
+                      >
+                        {r === 'normal' ? '通常' : 'HD'}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                {/* ログ操作 */}
+                <div className="flex items-center justify-between pt-1 border-t border-gray-600">
+                  <span className="text-gray-400">Vision ログ</span>
+                  <div className="flex gap-1">
+                    <button
+                      onClick={() => exportVisionLog().catch(console.error)}
+                      className="px-2 py-1 rounded bg-gray-600 hover:bg-gray-500"
+                    >
+                      Export
+                    </button>
+                    <button
+                      onClick={() => {
+                        if (confirm('Vision ログを削除しますか？')) {
+                          clearVisionLog().catch(console.error)
+                        }
+                      }}
+                      className="px-2 py-1 rounded bg-gray-600 hover:text-red-400"
+                    >
+                      Clear
+                    </button>
+                  </div>
+                </div>
+              </>
+            )}
+          </div>
+        )}
 
         {/* メッセージ一覧 */}
         <div className="flex-1 overflow-y-auto p-4 space-y-3">
