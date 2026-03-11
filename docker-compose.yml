@@ -19,6 +19,7 @@ services:
       interval: 5s
       timeout: 3s
       retries: 5
+    restart: unless-stopped
 
   # ─── Embedding サーバー (Hugging Face TEI) ───
   embedding:
@@ -39,6 +40,7 @@ services:
             - driver: nvidia
               count: 1
               capabilities: [ gpu ]
+    restart: unless-stopped
 
 volumes:
   pgdata:
