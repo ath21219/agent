@@ -80,6 +80,52 @@ export async function POST(request: NextRequest) {
         return NextResponse.json({ summary: result })
       }
 
+      case 'extractAndSaveFacts': {
+        const { recentMessages } = body
+
+        const elements = await s.getAllPersonalElements()
+        const knownFacts = elements.map(e => e.summary)
+
+        const origin = request.nextUrl.origin
+        const llmEndpoint = `${origin}/api/llm/chat/completions`
+
+        const { extractFacts } = await import('@/lib/fact-extractor')
+        const newFacts = await extractFacts(recentMessages, knownFacts, llmEndpoint)
+
+        const savedIds: number[] = []
+        for (const fact of newFacts) {
+          const id = await s.savePersonalElement(fact.summary, [], fact.importance)
+          savedIds.push(id)
+        }
+
+        console.log(`[Memory] Extracted ${newFacts.length} facts, saved IDs: [${savedIds}]`)
+        return NextResponse.json({ facts: newFacts, savedIds })
+      }
+
+      case 'summarizeAndTrim': {
+        const { messages: msgsToSummarize, chatIdFrom, chatIdTo, sessionId } = body
+
+        const origin = request.nextUrl.origin
+        const llmEndpoint = `${origin}/api/llm/chat/completions`
+
+        const { summarizeConversation } = await import('@/lib/summarizer')
+        const summary = await summarizeConversation(msgsToSummarize, llmEndpoint)
+
+        if (!summary) {
+          return NextResponse.json({ error: 'Summarization failed' }, { status: 500 })
+        }
+
+        const id = await s.saveConversationSummary(
+          summary,
+          chatIdFrom || 0,
+          chatIdTo || 0,
+          sessionId,
+        )
+
+        console.log(`[Memory] Saved conversation summary #${id}`)
+        return NextResponse.json({ summaryId: id, summary })
+      }
+
       default:
         return NextResponse.json({ error: `Unknown action: ${action}` }, { status: 400 })
     }

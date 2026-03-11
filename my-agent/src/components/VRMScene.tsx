@@ -12,6 +12,7 @@ import {
   VRM,
   VRMExpressionPresetName,
   VRMHumanBoneName,
+  VRMUtils,
 } from '@pixiv/three-vrm'
 import type { VRMViseme } from '@/lib/lipsync'
 
@@ -123,6 +124,10 @@ export default function VRMScene({ isSpeaking, visemeWeights, emotion, onCanvasR
     scene.add(dirLight)
     scene.add(new THREE.AmbientLight(0xffffff, 0.6))
 
+    const fillLight = new THREE.DirectionalLight(0xffffff, 0.5)
+    fillLight.position.set(-1, 1, -1)
+    scene.add(fillLight)
+
     const lookAtTarget = new THREE.Object3D()
     camera.add(lookAtTarget)
     scene.add(camera)
@@ -133,16 +138,16 @@ export default function VRMScene({ isSpeaking, visemeWeights, emotion, onCanvasR
     loader.load('/models/agent.vrm', (gltf) => {
       const vrm = gltf.userData.vrm as VRM
       scene.add(vrm.scene)
-      vrm.scene.rotation.y = Math.PI
+      VRMUtils.rotateVRM0(vrm)
 
       const leftUpperArm = vrm.humanoid.getNormalizedBoneNode(VRMHumanBoneName.LeftUpperArm)
       const rightUpperArm = vrm.humanoid.getNormalizedBoneNode(VRMHumanBoneName.RightUpperArm)
-      if (leftUpperArm) leftUpperArm.rotation.z = 1.2
-      if (rightUpperArm) rightUpperArm.rotation.z = -1.2
+      if (leftUpperArm) leftUpperArm.rotation.z = -1.2
+      if (rightUpperArm) rightUpperArm.rotation.z = 1.2
       const leftLowerArm = vrm.humanoid.getNormalizedBoneNode(VRMHumanBoneName.LeftLowerArm)
       const rightLowerArm = vrm.humanoid.getNormalizedBoneNode(VRMHumanBoneName.RightLowerArm)
-      if (leftLowerArm) leftLowerArm.rotation.y = -0.15
-      if (rightLowerArm) rightLowerArm.rotation.y = 0.15
+      if (leftLowerArm) leftLowerArm.rotation.y = 0.15
+      if (rightLowerArm) rightLowerArm.rotation.y = -0.15
 
       if (vrm.lookAt) vrm.lookAt.target = lookAtTarget
 
@@ -186,8 +191,8 @@ export default function VRMScene({ isSpeaking, visemeWeights, emotion, onCanvasR
         }
         const leftUpperArmNode = vrm.humanoid.getNormalizedBoneNode(VRMHumanBoneName.LeftUpperArm)
         const rightUpperArmNode = vrm.humanoid.getNormalizedBoneNode(VRMHumanBoneName.RightUpperArm)
-        if (leftUpperArmNode) leftUpperArmNode.rotation.z = 1.2 + simplex.noise(elapsed * 0.4, 20) * 0.005
-        if (rightUpperArmNode) rightUpperArmNode.rotation.z = -1.2 + simplex.noise(elapsed * 0.35, 30) * 0.005
+        if (leftUpperArmNode) leftUpperArmNode.rotation.z = -1.2 + simplex.noise(elapsed * 0.4, 20) * 0.005
+        if (rightUpperArmNode) rightUpperArmNode.rotation.z = 1.2 + simplex.noise(elapsed * 0.35, 30) * 0.005
 
         // 3. 視線追従
         const lerpSpeed = 1.0 - Math.pow(0.001, delta)
